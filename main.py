@@ -23,7 +23,7 @@ def load_config():
     """加载配置文件"""
     config_file = "config.json"
     default_config = {
-        "target_group_id": 955256911,
+        "target_group_id": None,
         "ws_url": DEFAULT_WS_URL,
         "auto_reply_text": "好"
     }
