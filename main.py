@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import json
 import time
 import threading
@@ -20,26 +21,87 @@ DEFAULT_WS_URL = "ws://127.0.0.1:3001/onebot/v11/ws"
 
 
 def load_config():
-    """加载配置文件"""
+    """加载配置文件，如果不存在则创建默认配置"""
     config_file = "config.json"
     default_config = {
-        "target_group_id": None,
-        "ws_url": DEFAULT_WS_URL,
-        "auto_reply_text": "好"
+        "target_group_id": 955256911,
+        "ws_host": "127.0.0.1",
+        "ws_port": 3001,
+        "ws_path": "/onebot/v11/ws",
+        "auto_reply_text": "好",
+        "max_message_length": 24
     }
-    if os.path.exists(config_file):
+
+    if not os.path.exists(config_file):
+        # 文件不存在，创建默认配置
+        print(f"[调试] 配置文件不存在，创建默认配置: {config_file}", flush=True)
+        save_config(default_config)
+        return default_config
+
+    # 尝试加载配置
+    config = None
+    content = ""
+    content_fixed = ""
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        # 兼容 Python 写法：None -> null, True -> true, False -> false
+        content_fixed = content
+        content_fixed = re.sub(r'\bNone\b', 'null', content_fixed)
+        content_fixed = re.sub(r'\bTrue\b', 'true', content_fixed)
+        content_fixed = re.sub(r'\bFalse\b', 'false', content_fixed)
+        config = json.loads(content_fixed)
+    except Exception as e:
+        print(f"[错误] 配置文件读取失败: {e}，请检查 config.json 格式（注意 JSON 中 null 不能写成 None）", flush=True)
+        return default_config
+
+    # 配置文件需要修复（如果原本是 Python 写法），重新保存为标准 JSON
+    if content != content_fixed:
+        print(f"[调试] 配置文件使用了 Python 写法，已自动转换为标准 JSON", flush=True)
+        save_config(config)
+
+    # 确保所有必要字段都存在
+    for key, value in default_config.items():
+        # target_group_id 特殊处理：如果明确设置为 None/0，不使用默认值
+        if key == "target_group_id":
+            # 只有当字段不存在时才使用默认值
+            if key not in config:
+                config[key] = value
+        else:
+            if key not in config:
+                config[key] = value
+
+    # 如果是旧版配置（有ws_url），更新为新的分割格式
+    if "ws_url" in config and "ws_port" not in config:
+        old_url = config.pop("ws_url")
         try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            parts = old_url.replace("ws://", "").split("/")
+            host_port = parts[0].split(":")
+            config["ws_host"] = host_port[0]
+            config["ws_port"] = int(host_port[1]) if len(host_port) > 1 else 3001
+            config["ws_path"] = "/" + "/".join(parts[1:])
         except:
-            return default_config
-    return default_config
+            config["ws_host"] = "127.0.0.1"
+            config["ws_port"] = 3001
+            config["ws_path"] = "/onebot/v11/ws"
+
+    return config
 
 
 def save_config(config):
     """保存配置文件"""
-    with open("config.json", "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+    config_file = "config.json"
+    try:
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=4)
+        print(f"[调试] 配置已保存: {config_file}", flush=True)
+    except Exception as e:
+        print(f"[调试] 配置保存失败: {e}", flush=True)
+
+
+def get_ws_url(config):
+    """根据配置构建WebSocket URL"""
+    return f"ws://{config.get('ws_host', '127.0.0.1')}:{config.get('ws_port', 3001)}{config.get('ws_path', '/onebot/v11/ws')}"
 
 
 class Communicate(QObject):
@@ -79,9 +141,7 @@ class NotificationWindow(QWidget):
         self.move(x, self.start_y)
 
         # 截断长消息
-        display_msg = self.message_text
-        if len(display_msg) > 24:
-            display_msg = display_msg[:24] + "..."
+        display_msg = self.truncate_message(self.message_text)
 
         # 创建标题和消息标签
         title_label = QLabel(f"{group_name}  ·  {nickname}", self)
@@ -109,6 +169,13 @@ class NotificationWindow(QWidget):
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self.start_slide_out)
         self.hide_timer.start(self.delay_ms)
+
+    def truncate_message(self, message_text):
+        """截断长消息，超过24字符用省略号"""
+        max_length = 24
+        if len(message_text) > max_length:
+            return message_text[:max_length] + "..."
+        return message_text
 
     def paintEvent(self, event):
         """绘制胶囊形状（左右半圆）"""
@@ -143,9 +210,7 @@ class NotificationWindow(QWidget):
         self.message_text = message_text
 
         # 截断长消息
-        display_msg = message_text
-        if len(display_msg) > 24:
-            display_msg = display_msg[:24] + "..."
+        display_msg = self.truncate_message(message_text)
 
         # 更新标签
         for child in self.findChildren(QLabel):
@@ -173,30 +238,35 @@ class ConfigWindow:
 
         self.root = tk.Tk()
         self.root.title("设置")
-        self.root.geometry("350x180")
+        self.root.geometry("380x200")
         self.root.attributes('-topmost', True)
 
         frame = ttk.Frame(self.root, padding=20)
         frame.pack(fill=tk.BOTH, expand=True)
 
         # 群号
-        ttk.Label(frame, text="目标群号:", font=("微软雅黑", 10)).grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="目标群号:", font=("微软雅黑", 10)).grid(row=0, column=0, sticky=tk.W, pady=6)
         self.group_id_var = tk.StringVar(value=str(self.config.get("target_group_id", "")))
-        ttk.Entry(frame, textvariable=self.group_id_var, width=30).grid(row=0, column=1, pady=5)
+        ttk.Entry(frame, textvariable=self.group_id_var, width=30).grid(row=0, column=1, pady=6)
 
-        # WebSocket端口
-        ttk.Label(frame, text="WebSocket端口:", font=("微软雅黑", 10)).grid(row=1, column=0, sticky=tk.W, pady=5)
+        # WebSocket 主机
+        ttk.Label(frame, text="WebSocket主机:", font=("微软雅黑", 10)).grid(row=1, column=0, sticky=tk.W, pady=6)
+        self.host_var = tk.StringVar(value=self.config.get("ws_host", "127.0.0.1"))
+        ttk.Entry(frame, textvariable=self.host_var, width=30).grid(row=1, column=1, pady=6)
+
+        # WebSocket 端口
+        ttk.Label(frame, text="WebSocket端口:", font=("微软雅黑", 10)).grid(row=2, column=0, sticky=tk.W, pady=6)
         self.port_var = tk.StringVar(value=str(self.config.get("ws_port", 3001)))
-        ttk.Entry(frame, textvariable=self.port_var, width=30).grid(row=1, column=1, pady=5)
+        ttk.Entry(frame, textvariable=self.port_var, width=30).grid(row=2, column=1, pady=6)
 
         # 自动回复文本
-        ttk.Label(frame, text="回复文本:", font=("微软雅黑", 10)).grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="回复文本:", font=("微软雅黑", 10)).grid(row=3, column=0, sticky=tk.W, pady=6)
         self.reply_var = tk.StringVar(value=self.config.get("auto_reply_text", "好"))
-        ttk.Entry(frame, textvariable=self.reply_var, width=30).grid(row=2, column=1, pady=5)
+        ttk.Entry(frame, textvariable=self.reply_var, width=30).grid(row=3, column=1, pady=6)
 
         # 按钮
         button_frame = ttk.Frame(frame)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=15)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=15)
 
         ttk.Button(button_frame, text="保存", command=self.save).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.root.destroy).pack(side=tk.LEFT, padx=5)
@@ -207,20 +277,25 @@ class ConfigWindow:
         """保存配置"""
         try:
             port = int(self.port_var.get())
-            self.config["ws_port"] = port
-            self.config["ws_url"] = f"ws://127.0.0.1:{port}/onebot/v11/ws"
+            if port <= 0 or port > 65535:
+                raise ValueError("端口号无效")
         except ValueError:
-            messagebox.showerror("错误", "端口必须是数字")
+            messagebox.showerror("错误", "端口必须是1-65535的数字")
             return
 
         try:
             group_id = int(self.group_id_var.get())
-            self.config["target_group_id"] = group_id
+            if group_id <= 0:
+                raise ValueError("群号无效")
         except ValueError:
-            messagebox.showerror("错误", "群号必须是数字")
+            messagebox.showerror("错误", "群号必须是正整数")
             return
 
+        self.config["target_group_id"] = group_id
+        self.config["ws_host"] = self.host_var.get().strip()
+        self.config["ws_port"] = port
         self.config["auto_reply_text"] = self.reply_var.get()
+
         save_config(self.config)
         messagebox.showinfo("成功", "配置已保存，请重启程序生效")
         self.root.destroy()
@@ -233,9 +308,8 @@ class QQMonitor:
         self.qt_app = qt_app
         self.config = load_config()
         self.target_group_id = self.config.get("target_group_id", 0)
-        self.ws_url = self.config.get("ws_url", DEFAULT_WS_URL)
+        self.ws_url = get_ws_url(self.config)
         self.auto_reply_text = self.config.get("auto_reply_text", "好")
-        self.reply_delay = self.config.get("reply_delay", 2)
 
         # 检查群号
         if not self.target_group_id or self.target_group_id == 0:
