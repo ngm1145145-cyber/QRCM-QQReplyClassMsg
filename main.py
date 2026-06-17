@@ -24,7 +24,7 @@ def load_config():
     """加载配置文件，如果不存在则创建默认配置"""
     config_file = "config.json"
     default_config = {
-        "target_group_id": 955256911,
+        "target_group_id": None,
         "ws_host": "127.0.0.1",
         "ws_port": 3001,
         "ws_path": "/onebot/v11/ws",
